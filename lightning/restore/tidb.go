@@ -22,6 +22,7 @@ import (
 	"sync"
 
 	tmysql "github.com/go-sql-driver/mysql"
+	"github.com/pingcap/br/pkg/storage"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/parser"
 	"github.com/pingcap/parser/ast"
@@ -39,7 +40,6 @@ import (
 	"github.com/pingcap/tidb-lightning/lightning/mydump"
 
 	"go.uber.org/zap"
-	"go.uber.org/zap/zapcore"
 )
 
 type TiDBManager struct {
@@ -128,7 +128,135 @@ func (timgr *TiDBManager) Close() {
 
 type schemaJob struct {
 	sql string
-	log zapcore.Field
+}
+
+type schemaInit struct {
+	ctx   context.Context
+	quit  context.CancelFunc
+	wg    sync.WaitGroup
+	queue chan *schemaJob
+	errCh chan error
+}
+
+func (init *schemaInit) handleError() {
+	for {
+		select {
+		case <-init.errCh:
+			init.quit()
+			return
+		case <-init.ctx.Done():
+			return
+		}
+	}
+}
+
+func (init *schemaInit) run() {
+	for {
+		select {
+		case <-init.ctx.Done():
+			return
+		case <-init.queue:
+			//TODO: maybe we should put these createStems into a transaction
+			// err = exec.ExecuteWithLog(ctx, job.sql, "test for now", logger)
+			init.wg.Done()
+			// if err != nil {
+			// 	errCh <- err
+			// }
+		}
+	}
+}
+
+func AInitSchema(ctx context.Context, concurrency int, parser *parser.Parser, exec glue.SQLExecutor, dbMetas []*mydump.MDDatabaseMeta, store storage.ExternalStorage) error {
+	var wg sync.WaitGroup
+	var err error
+	fnRun := func(ctx context.Context, exec glue.SQLExecutor, jobCh chan *schemaJob, logger log.Logger, errCh chan error) {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case job := <-jobCh:
+				//TODO: maybe we should put these createStems into a transaction
+				err = exec.ExecuteWithLog(ctx, job.sql, "test for now", logger)
+				wg.Done()
+				if err != nil {
+					errCh <- err
+				}
+			}
+		}
+	}
+	fnHandleError := func(ctx context.Context, err error, errCh chan error, quit context.CancelFunc) {
+		for {
+			select {
+			case err = <-errCh:
+				quit()
+				return
+			case <-ctx.Done():
+				return
+			}
+		}
+	}
+	errCh := make(chan error)
+	queue := make(chan *schemaJob, concurrency)
+	childCtx, cancel := context.WithCancel(ctx)
+	logger := log.With(zap.String("db", "database"))
+	for i := 0; i < concurrency; i++ {
+		go fnRun(childCtx, exec, queue, logger, errCh)
+	}
+	go fnHandleError(childCtx, err, errCh, cancel)
+
+	for _, dbMeta := range dbMetas {
+		var createDatabase strings.Builder
+		createDatabase.WriteString("CREATE DATABASE IF NOT EXISTS ")
+		common.WriteMySQLIdentifier(&createDatabase, dbMeta.Name)
+		wg.Add(1)
+		queue <- &schemaJob{
+			sql: createDatabase.String(),
+		}
+	}
+	wg.Wait()
+	for _, dbMeta := range dbMetas {
+		if len(dbMeta.Tables) > 0 {
+			for _, tblMeta := range dbMeta.Tables {
+				sql := tblMeta.GetSchema(ctx, store)
+				if sql != "" {
+					stmts, err := createTableIfNotExistsStmt(parser, sql, dbMeta.Name, tblMeta.Name)
+					if err != nil {
+						errCh <- err
+						break
+					}
+					for _, stmt := range stmts {
+						wg.Add(1)
+						queue <- &schemaJob{
+							sql: stmt,
+						}
+					}
+				}
+			}
+		}
+	}
+	wg.Wait()
+	for _, dbMeta := range dbMetas {
+		if len(dbMeta.Views) > 0 {
+			for _, viewMeta := range dbMeta.Views {
+				sql := viewMeta.GetSchema(ctx, store)
+				if sql != "" {
+					stmts, err := createTableIfNotExistsStmt(parser, sql, dbMeta.Name, viewMeta.Name)
+					if err != nil {
+						errCh <- err
+						break
+					}
+					for _, stmt := range stmts {
+						wg.Add(1)
+						queue <- &schemaJob{
+							sql: stmt,
+						}
+					}
+				}
+			}
+		}
+	}
+	wg.Wait()
+	return errors.Trace(err)
 }
 
 func InitSchema(ctx context.Context, concurrency int, parser *parser.Parser, exec glue.SQLExecutor, database string, tablesSchema map[string]string) error {
