@@ -27,7 +27,7 @@ start_services
 
 # Intermediate file needed because `read` can be used as a pipe target.
 # https://stackoverflow.com/q/2746553/
-run_curl 'https://127.0.0.1:2379/pd/api/v1/version' | grep -o 'v[0-9.]\+' > "$TEST_DIR/cluster_version.txt"
+run_curl 'http://127.0.0.1:2379/pd/api/v1/version' | grep -o 'v[0-9.]\+' > "$TEST_DIR/cluster_version.txt"
 IFS='.' read CLUSTER_VERSION_MAJOR CLUSTER_VERSION_MINOR CLUSTER_VERSION_REVISION < "$TEST_DIR/cluster_version.txt"
 
 if [ "${1-}" = '--debug' ]; then

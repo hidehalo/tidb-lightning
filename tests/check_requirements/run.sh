@@ -16,7 +16,7 @@
 set -eux
 
 curl_cluster_version() {
-    run_curl 'https://127.0.0.1:2379/pd/api/v1/config/cluster-version' "$@"
+    run_curl 'http://127.0.0.1:2379/pd/api/v1/config/cluster-version' "$@"
 }
 
 # should be OK when the version is normal
