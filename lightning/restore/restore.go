@@ -329,12 +329,9 @@ func (worker *restoreSchemaWorker) makeJobs(dbMetas []*mydump.MDDatabaseMeta) {
 	go func() {
 		for _, dbMeta := range dbMetas {
 			// task := log.With(zap.String("db", dbMeta.Name)).Begin(zap.InfoLevel, "restore table schema")
-			var createDatabase strings.Builder
-			createDatabase.WriteString("CREATE DATABASE IF NOT EXISTS ")
-			common.WriteMySQLIdentifier(&createDatabase, dbMeta.Name)
 			worker.wg.Add(1)
 			worker.jobCh <- &schemaJob{
-				sql:     createDatabase.String(),
+				sql:     createDatabaseIfNotExistStmt(dbMeta.Name),
 				jobType: schemaCreateDatabase,
 			}
 		}
@@ -464,7 +461,10 @@ func (rc *RestoreController) restoreSchema(ctx context.Context) error {
 		}
 		worker.makeJobs(rc.dbMetas)
 		worker.run()
-		worker.wait()
+		err = worker.wait()
+		if err != nil {
+			return err
+		}
 		// for _, dbMeta := range rc.dbMetas {
 		// 	task := log.With(zap.String("db", dbMeta.Name)).Begin(zap.InfoLevel, "restore table schema")
 
