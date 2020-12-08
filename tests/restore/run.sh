@@ -17,20 +17,20 @@ set -eu
 
 # Populate the mydumper source
 DBPATH="$TEST_DIR/restore.mydump"
-TABLE_COUNT=35
+TABLE_COUNT=300
 
 echo "DBPATH=$DBPATH"
 
 mkdir -p $DBPATH
-
-echo "List DBPATH"
-ls $DBPATH
 
 echo 'CREATE DATABASE restore_tsr;' > "$DBPATH/restore_tsr-schema-create.sql"
 for i in $(seq "$TABLE_COUNT"); do
     echo "CREATE TABLE tbl$i(i TINYINT);" > "$DBPATH/restore_tsr.tbl$i-schema.sql"
     echo "INSERT INTO tbl$i VALUES (1);" > "$DBPATH/restore_tsr.tbl$i.sql"
 done
+
+echo "List DBPATH"
+ls $DBPATH
 
 # Count OpenEngine and CloseEngine events.
 # Abort if number of unbalanced OpenEngine is >= 4
