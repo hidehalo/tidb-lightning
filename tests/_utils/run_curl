@@ -26,8 +26,9 @@ fi
 
 # FIXME: use `wget` instead of `curl` because the latter rejects ECC certs on our CI.
 # CentOS is re~~ally old.
-wget -q -O - \
-    --ca-certificate="$TEST_DIR/tls/ca.pem" \
-    --certificate="$TEST_DIR/tls/curl.pem" \
-    --private-key="$TEST_DIR/tls/curl.key" \
-    $POST_ARGS "$1"
+# wget -q -O - \
+#     --ca-certificate="$TEST_DIR/tls/ca.pem" \
+#     --certificate="$TEST_DIR/tls/curl.pem" \
+#     --private-key="$TEST_DIR/tls/curl.key" \
+#     $POST_ARGS "$1"
+$PWD/bin/curl --cacert "$TEST_DIR/tls/ca.pem" --cert "$TEST_DIR/tls/curl.pem" --key "$TEST_DIR/tls/curl.key" $POST_ARGS "$1"
