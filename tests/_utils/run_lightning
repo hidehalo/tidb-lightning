@@ -15,12 +15,11 @@
 
 set -eu
 TEST_DIR=/tmp/lightning_test_result
-
+# --ca "$TEST_DIR/tls/ca.pem" \
+# --cert "$TEST_DIR/tls/lightning.pem" \
+# --key "$TEST_DIR/tls/lightning.key" \
 echo "[$(date)] <<<<<< RUNNING TEST FOR: tests/$TEST_NAME $@ >>>>>>" >> "$TEST_DIR/lightning.log"
 bin/tidb-lightning.test -test.coverprofile="$TEST_DIR/cov.$TEST_NAME.$$.out" DEVEL \
-    --ca "$TEST_DIR/tls/ca.pem" \
-    --cert "$TEST_DIR/tls/lightning.pem" \
-    --key "$TEST_DIR/tls/lightning.key" \
     --log-file "$TEST_DIR/lightning.log" \
     --tidb-port 4000 \
     --pd-urls '127.0.0.1:2379' \
