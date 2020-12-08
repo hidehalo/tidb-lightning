@@ -19,7 +19,13 @@ set -eu
 DBPATH="$TEST_DIR/restore.mydump"
 TABLE_COUNT=35
 
+echo "DBPATH=$DBPATH"
+
 mkdir -p $DBPATH
+
+echo "List DBPATH"
+ls $DBPATH
+
 echo 'CREATE DATABASE restore_tsr;' > "$DBPATH/restore_tsr-schema-create.sql"
 for i in $(seq "$TABLE_COUNT"); do
     echo "CREATE TABLE tbl$i(i TINYINT);" > "$DBPATH/restore_tsr.tbl$i-schema.sql"
