@@ -19,7 +19,10 @@ TEST_DIR=/tmp/lightning_test_result
 # --cert "$TEST_DIR/tls/lightning.pem" \
 # --key "$TEST_DIR/tls/lightning.key" \
 echo "[$(date)] <<<<<< RUNNING TEST FOR: tests/$TEST_NAME $@ >>>>>>" >> "$TEST_DIR/lightning.log"
-bin/tidb-lightning.test -test.coverprofile="$TEST_DIR/cov.$TEST_NAME.$$.out" DEVEL \
+bin/tidb-lightning.test -test.coverprofile="$TEST_DIR/cov.$TEST_NAME.$$.out" \
+    -test.blockprofile="$TEST_DIR/block.$TEST_NAME.$$.out" \
+    -test.cpuprofile="$TEST_DIR/cpu.$TEST_NAME.$$.out" \
+    -test.memprofile="$TEST_DIR/mem.$TEST_NAME.$$.out" DEVEL \
     --log-file "$TEST_DIR/lightning.log" \
     --tidb-port 4000 \
     --pd-urls '127.0.0.1:2379' \
