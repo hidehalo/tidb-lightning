@@ -18,11 +18,12 @@
 set -eu
 TEST_DIR=/tmp/lightning_test_result
 
-if [ -z "${2-}" ]; then
-    POST_ARGS=
-else
-    POST_ARGS="--post-data $2"
-fi
+# if [ -z "${2-}" ]; then
+#     POST_ARGS=
+# else
+#     POST_ARGS="--post-data $2"
+# fi
+POST_ARGS=
 
 # FIXME: use `wget` instead of `curl` because the latter rejects ECC certs on our CI.
 # CentOS is re~~ally old.
