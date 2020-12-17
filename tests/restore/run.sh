@@ -34,7 +34,7 @@ ls $DBPATH
 
 # Count OpenEngine and CloseEngine events.
 # Abort if number of unbalanced OpenEngine is >= 4
-export GO_FAILPOINTS='github.com/pingcap/tidb-lightning/lightning/kv/FailIfEngineCountExceeds=return(4)'
+export GO_FAILPOINTS='github.com/pingcap/tidb-lightning/lightning/backend/FailIfEngineCountExceeds=return(4)'
 
 # Start importing
 run_sql 'DROP DATABASE IF EXISTS restore_tsr'
