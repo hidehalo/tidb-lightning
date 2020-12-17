@@ -40,8 +40,8 @@ EOF
     if [ "$(uname)" = "Darwin" ]; then
         echo "Detected that you are using MacOS, we need to add a few trusted certificate files for testing..."
         # sudo security import "$TT/ca.pem" -t cert -f openssl -k "/Library/Keychains/System.keychain"
-        sudo security import "$TT/ca.key" -t priv -f openssl -k "/Library/Keychains/System.keychain"
-        # sudo security add-trusted-cert -d -r trustRoot -k "/Library/Keychains/System.keychain" "$TT/ca.pem"
+        # sudo security import "$TT/ca.key" -t priv -f openssl -k "/Library/Keychains/System.keychain"
+        sudo security add-trusted-cert -u -1 -r trustRoot -k "/Library/Keychains/System.keychain" "$TT/ca.pem"
     fi
     for cluster in tidb pd tikv importer lightning tiflash curl; do
         openssl ecparam -out "$TT/$cluster.key" -name prime256v1 -genkey
@@ -49,8 +49,8 @@ EOF
         openssl x509 -req -sha256 -days 1 -extensions EXT -extfile "$TT/ipsan.cnf" -in "$TT/$cluster.csr" -CA "$TT/ca.pem" -CAkey "$TT/ca.key" -CAcreateserial -out "$TT/$cluster.pem" 2> /dev/null
         if [ "$(uname)" = "Darwin" ]; then
             # sudo security import "$TT/$cluster.pem" -t cert -f openssl -k "/Library/Keychains/System.keychain"
-            sudo security import "$TT/$cluster.key" -t priv -f openssl -k "/Library/Keychains/System.keychain"
-            # sudo security add-trusted-cert -d -r trustAsRoot -k "/Library/Keychains/System.keychain" "$TT/$cluster.pem"
+            # sudo security import "$TT/$cluster.key" -t priv -f openssl -k "/Library/Keychains/System.keychain"
+            sudo security add-trusted-cert -u -1 -r trustAsRoot -k "/Library/Keychains/System.keychain" "$TT/$cluster.pem"
         fi
     done
 
