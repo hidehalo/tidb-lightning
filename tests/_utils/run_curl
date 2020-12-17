@@ -26,8 +26,14 @@ fi
 
 # FIXME: use `wget` instead of `curl` because the latter rejects ECC certs on our CI.
 # CentOS is re~~ally old.
+# MacOS doesn't trust self-signed certificate file, so we don't check it
+if [ "$(uname)" = "Darwin" ]; then
+    CHECK_CERT="--no-check-certificate"
+else
+    CHECK_CERT=
+fi
 wget -q -O - \
     --ca-certificate="$TEST_DIR/tls/ca.pem" \
     --certificate="$TEST_DIR/tls/curl.pem" \
     --private-key="$TEST_DIR/tls/curl.key" \
-    $POST_ARGS "$1"
+    $POST_ARGS "$1" $CHECK_CERT
