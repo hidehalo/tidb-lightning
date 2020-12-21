@@ -30,6 +30,7 @@ import (
 	"github.com/pingcap/failpoint"
 	sstpb "github.com/pingcap/kvproto/pkg/import_sstpb"
 	"github.com/pingcap/parser/model"
+	"github.com/pingcap/tidb-lightning/lightning/checkpoints"
 	"github.com/pingcap/tidb-lightning/lightning/glue"
 	tidbcfg "github.com/pingcap/tidb/config"
 	"github.com/pingcap/tidb/meta/autoid"
@@ -49,9 +50,6 @@ import (
 	verify "github.com/pingcap/tidb-lightning/lightning/verification"
 	"github.com/pingcap/tidb-lightning/lightning/web"
 	"github.com/pingcap/tidb-lightning/lightning/worker"
-
-	// TODO: remove this after https://github.com/pingcap/tidb/issues/21342 is fixed.
-	_ "github.com/pingcap/tidb/planner/core"
 )
 
 const (
@@ -184,12 +182,12 @@ func NewRestoreControllerWithPauser(
 
 	cpdb, err := g.OpenCheckpointsDB(ctx, cfg)
 	if err != nil {
-		return nil, errors.Trace(err)
+		return nil, errors.Annotate(err, "open checkpoint db failed")
 	}
 
 	taskCp, err := cpdb.TaskCheckpoint(ctx)
 	if err != nil {
-		return nil, errors.Trace(err)
+		return nil, errors.Annotate(err, "get task checkpoint failed")
 	}
 	if err := verifyCheckpoint(cfg, taskCp); err != nil {
 		return nil, errors.Trace(err)
@@ -201,12 +199,12 @@ func NewRestoreControllerWithPauser(
 		var err error
 		backend, err = kv.NewImporter(ctx, tls, cfg.TikvImporter.Addr, cfg.TiDB.PdAddr)
 		if err != nil {
-			return nil, err
+			return nil, errors.Annotate(err, "open importer backend failed")
 		}
 	case config.BackendTiDB:
 		db, err := DBFromConfig(cfg.TiDB)
 		if err != nil {
-			return nil, errors.Trace(err)
+			return nil, errors.Annotate(err, "open tidb backend failed")
 		}
 		backend = kv.NewTiDBBackend(db, cfg.TikvImporter.OnDuplicate)
 	case config.BackendLocal:
@@ -225,7 +223,7 @@ func NewRestoreControllerWithPauser(
 			cfg.TikvImporter.SortedKVDir, cfg.TikvImporter.RangeConcurrency, cfg.TikvImporter.SendKVPairs,
 			cfg.Checkpoint.Enable, g, maxOpenFiles)
 		if err != nil {
-			return nil, err
+			return nil, errors.Annotate(err, "build local backend failed")
 		}
 	default:
 		return nil, errors.New("unknown backend: " + cfg.TikvImporter.Backend)
@@ -307,48 +305,206 @@ outside:
 	return errors.Trace(err)
 }
 
-func (rc *RestoreController) restoreSchema(ctx context.Context) error {
-	if !rc.cfg.Mydumper.NoSchema {
-		if rc.tidbGlue.OwnsSQLExecutor() {
-			db, err := DBFromConfig(rc.cfg.TiDB)
-			if err != nil {
-				return errors.Trace(err)
+type schemaStmtType int
+
+const (
+	schemaCreateDatabase = iota
+	schemaCreateTable
+	schemaCreateView
+)
+
+type schemaJob struct {
+	dbName  string
+	session checkpoints.Session
+	stmts   []*schemaStmt
+}
+
+type schemaStmt struct {
+	tblName  string
+	stmtType schemaStmtType
+	sql      string
+}
+
+type restoreSchemaWorker struct {
+	ctx      context.Context
+	quit     context.CancelFunc
+	jobCh    chan *schemaJob
+	errCh    chan error
+	wg       sync.WaitGroup
+	glue     glue.Glue
+	store    storage.ExternalStorage
+	sessions map[string]checkpoints.Session
+}
+
+func (worker *restoreSchemaWorker) makeJobs(dbMetas []*mydump.MDDatabaseMeta) {
+	//TODO: maybe we should put these create statements into a transaction
+	select {
+	case <-worker.ctx.Done():
+		return
+	default:
+		// 1. restore databases, execute statements concurrency
+		for _, dbMeta := range dbMetas {
+			restoreSchemaJob := &schemaJob{
+				dbName:  dbMeta.Name,
+				session: worker.getSession(dbMeta.Name),
+				stmts:   make([]*schemaStmt, 0, 1),
 			}
-			defer db.Close()
-			db.ExecContext(ctx, "SET SQL_MODE = ?", rc.cfg.TiDB.StrSQLMode)
+			worker.wg.Add(1)
+			restoreSchemaJob.stmts = append(restoreSchemaJob.stmts, &schemaStmt{
+				stmtType: schemaCreateDatabase,
+				sql:      createDatabaseIfNotExistStmt(dbMeta.Name),
+			})
+			worker.jobCh <- restoreSchemaJob
 		}
-
-		for _, dbMeta := range rc.dbMetas {
-			task := log.With(zap.String("db", dbMeta.Name)).Begin(zap.InfoLevel, "restore table schema")
-
-			tablesSchema := make(map[string]string)
+		worker.wg.Wait()
+		// 2. restore tables, execute statements concurrency
+		for _, dbMeta := range dbMetas {
 			for _, tblMeta := range dbMeta.Tables {
-				tablesSchema[tblMeta.Name] = tblMeta.GetSchema(ctx, rc.store)
-			}
-			err := InitSchema(ctx, rc.tidbGlue, dbMeta.Name, tablesSchema)
-
-			task.End(zap.ErrorLevel, err)
-			if err != nil {
-				return errors.Annotatef(err, "restore table schema %s failed", dbMeta.Name)
+				sql := tblMeta.GetSchema(worker.ctx, worker.store)
+				if sql != "" {
+					stmts, err := createTableIfNotExistsStmt(worker.glue.GetParser(), sql, dbMeta.Name, tblMeta.Name)
+					if err != nil {
+						worker.throw(err)
+					}
+					for _, sql := range stmts {
+						restoreSchemaJob := &schemaJob{
+							dbName:  dbMeta.Name,
+							session: worker.getSession(dbMeta.Name),
+							stmts:   make([]*schemaStmt, 0, 1),
+						}
+						worker.wg.Add(1)
+						restoreSchemaJob.stmts = append(restoreSchemaJob.stmts, &schemaStmt{
+							tblName:  tblMeta.Name,
+							stmtType: schemaCreateTable,
+							sql:      sql,
+						})
+						worker.jobCh <- restoreSchemaJob
+					}
+				}
 			}
 		}
-
-		// restore views. Since views can cross database we must restore views after all table schemas are restored.
-		for _, dbMeta := range rc.dbMetas {
-			if len(dbMeta.Views) > 0 {
-				task := log.With(zap.String("db", dbMeta.Name)).Begin(zap.InfoLevel, "restore view schema")
-				viewsSchema := make(map[string]string)
-				for _, viewMeta := range dbMeta.Views {
-					viewsSchema[viewMeta.Name] = viewMeta.GetSchema(ctx, rc.store)
+		worker.wg.Wait()
+		// 3. restore views. Since views can cross database we must restore views after all table schemas are restored.
+		for _, dbMeta := range dbMetas {
+			restoreSchemaJob := &schemaJob{
+				dbName:  dbMeta.Name,
+				session: worker.getSession(dbMeta.Name),
+				stmts:   make([]*schemaStmt, 0), // sadly, we can't pre-alloc precise value of cap
+			}
+			for _, viewMeta := range dbMeta.Views {
+				sql := viewMeta.GetSchema(worker.ctx, worker.store)
+				if sql != "" {
+					stmts, err := createTableIfNotExistsStmt(worker.glue.GetParser(), sql, dbMeta.Name, viewMeta.Name)
+					if err != nil {
+						worker.throw(err)
+					}
+					for _, sql := range stmts {
+						restoreSchemaJob.stmts = append(restoreSchemaJob.stmts, &schemaStmt{
+							tblName:  viewMeta.Name,
+							stmtType: schemaCreateView,
+							sql:      sql,
+						})
+					}
 				}
-				err := InitSchema(ctx, rc.tidbGlue, dbMeta.Name, viewsSchema)
+			}
+			worker.wg.Add(1)
+			worker.jobCh <- restoreSchemaJob
+			// we don't support restore views concurrency, cauz it maybe will raise a error
+			worker.wg.Wait()
+		}
+		worker.quit()
+	}
+}
 
+func (worker *restoreSchemaWorker) doJob() {
+	for {
+		select {
+		case <-worker.ctx.Done():
+			return
+		case job := <-worker.jobCh:
+			if job == nil {
+				return
+			}
+			var logger log.Logger
+			for _, stmt := range job.stmts {
+				if stmt.stmtType == schemaCreateDatabase {
+					logger = log.With(zap.String("db", job.dbName))
+				} else if stmt.stmtType == schemaCreateTable {
+					logger = log.With(zap.String("table", common.UniqueTable(job.dbName, stmt.tblName)))
+				} else if stmt.stmtType == schemaCreateView {
+					logger = log.With(zap.String("table", common.UniqueTable(job.dbName, stmt.tblName)))
+				}
+				task := logger.Begin(zap.DebugLevel, fmt.Sprintf("execute SQL: %s", stmt.sql))
+				_, err := job.session.Execute(worker.ctx, stmt.sql)
 				task.End(zap.ErrorLevel, err)
 				if err != nil {
-					return errors.Annotatef(err, "restore view schema %s failed", dbMeta.Name)
+					switch stmt.stmtType {
+					case schemaCreateDatabase:
+						err = errors.Annotatef(err, "restore database schema %s failed", job.dbName)
+					case schemaCreateTable:
+						err = errors.Annotatef(err, "restore table schema %s failed", stmt.tblName)
+					case schemaCreateView:
+						err = errors.Annotatef(err, "restore view schema %s failed", stmt.tblName)
+					}
+					worker.wg.Done()
+					worker.throw(err)
 				}
 			}
+			worker.wg.Done()
+		}
+	}
+}
 
+func (worker *restoreSchemaWorker) wait() error {
+	defer func() {
+		for _, session := range worker.sessions {
+			session.Close()
+		}
+	}()
+	select {
+	case err := <-worker.errCh:
+		defer worker.quit()
+		return err
+	case <-worker.ctx.Done():
+		return nil
+	}
+}
+
+func (worker *restoreSchemaWorker) throw(err error) {
+	worker.errCh <- err
+}
+
+func (worker *restoreSchemaWorker) getSession(sessionID string) checkpoints.Session {
+	if _, opened := worker.sessions[sessionID]; !opened {
+		session, err := worker.glue.GetSession(worker.ctx)
+		if err != nil {
+			worker.throw(err)
+		}
+		worker.sessions[sessionID] = session
+	}
+	return worker.sessions[sessionID]
+}
+
+func (rc *RestoreController) restoreSchema(ctx context.Context) error {
+	if !rc.cfg.Mydumper.NoSchema {
+		concurrency := 16
+		childCtx, cancel := context.WithCancel(ctx)
+		worker := restoreSchemaWorker{
+			ctx:      childCtx,
+			quit:     cancel,
+			jobCh:    make(chan *schemaJob, concurrency),
+			errCh:    make(chan error),
+			glue:     rc.tidbGlue,
+			store:    rc.store,
+			sessions: make(map[string]checkpoints.Session),
+		}
+		go worker.makeJobs(rc.dbMetas)
+		for i := 0; i < concurrency; i++ {
+			go worker.doJob()
+		}
+		err := worker.wait()
+		if err != nil {
+			return err
 		}
 	}
 	getTableFunc := rc.backend.FetchRemoteTableModels
