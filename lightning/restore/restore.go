@@ -308,6 +308,7 @@ outside:
 }
 
 func (rc *RestoreController) restoreSchema(ctx context.Context) error {
+	logTask := log.L().Begin(zap.InfoLevel, "restore all schemas")
 	if !rc.cfg.Mydumper.NoSchema {
 		if rc.tidbGlue.OwnsSQLExecutor() {
 			db, err := DBFromConfig(rc.cfg.TiDB)
@@ -317,7 +318,7 @@ func (rc *RestoreController) restoreSchema(ctx context.Context) error {
 			defer db.Close()
 			db.ExecContext(ctx, "SET SQL_MODE = ?", rc.cfg.TiDB.StrSQLMode)
 		}
-
+		dbLogTask := log.L().Begin(zap.InfoLevel, "restore all database&table's schemas")
 		for _, dbMeta := range rc.dbMetas {
 			task := log.With(zap.String("db", dbMeta.Name)).Begin(zap.InfoLevel, "restore table schema")
 
@@ -332,7 +333,8 @@ func (rc *RestoreController) restoreSchema(ctx context.Context) error {
 				return errors.Annotatef(err, "restore table schema %s failed", dbMeta.Name)
 			}
 		}
-
+		dbLogTask.End(zap.ErrorLevel, nil)
+		viewLogTask := log.L().Begin(zap.InfoLevel, "restore all view's schemas")
 		// restore views. Since views can cross database we must restore views after all table schemas are restored.
 		for _, dbMeta := range rc.dbMetas {
 			if len(dbMeta.Views) > 0 {
@@ -350,6 +352,7 @@ func (rc *RestoreController) restoreSchema(ctx context.Context) error {
 			}
 
 		}
+		viewLogTask.End(zap.ErrorLevel, nil)
 	}
 	getTableFunc := rc.backend.FetchRemoteTableModels
 	if !rc.tidbGlue.OwnsSQLExecutor() {
@@ -377,6 +380,7 @@ func (rc *RestoreController) restoreSchema(ctx context.Context) error {
 
 	// Estimate the number of chunks for progress reporting
 	err = rc.estimateChunkCountIntoMetrics(ctx)
+	logTask.End(zap.InfoLevel, err)
 	return err
 }
 
