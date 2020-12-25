@@ -12,7 +12,7 @@
 # distributed under the License is distributed on an "AS IS" BASIS,
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
+export PATH="tests/_utils:$PATH"
 set -eu
 
 # Populate the mydumper source
@@ -31,6 +31,16 @@ done
 
 echo "List DBPATH"
 ls $DBPATH
+
+cat - > "$TEST_DIR/importer-config.toml" <<EOF
+log-file = "$TEST_DIR/importer.log"
+[server]
+addr = "127.0.0.1:8808"
+[import]
+import-dir = "$TEST_DIR/importer"
+EOF
+ echo "Starting Importer..."
+bin/tikv-importer --config "$TEST_DIR/importer-config.toml" &
 
 # Count OpenEngine and CloseEngine events.
 # Abort if number of unbalanced OpenEngine is >= 4
