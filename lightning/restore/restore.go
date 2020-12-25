@@ -308,8 +308,8 @@ outside:
 }
 
 func (rc *RestoreController) restoreSchema(ctx context.Context) error {
-	logTask := log.L().Begin(zap.InfoLevel, "restore all schemas")
 	if !rc.cfg.Mydumper.NoSchema {
+		logTask := log.L().Begin(zap.InfoLevel, "restore schema")
 		if rc.tidbGlue.OwnsSQLExecutor() {
 			db, err := DBFromConfig(rc.cfg.TiDB)
 			if err != nil {
@@ -318,6 +318,7 @@ func (rc *RestoreController) restoreSchema(ctx context.Context) error {
 			defer db.Close()
 			db.ExecContext(ctx, "SET SQL_MODE = ?", rc.cfg.TiDB.StrSQLMode)
 		}
+		var err error
 		dbLogTask := log.L().Begin(zap.InfoLevel, "restore all database&table's schemas")
 		for _, dbMeta := range rc.dbMetas {
 			task := log.With(zap.String("db", dbMeta.Name)).Begin(zap.InfoLevel, "restore table schema")
@@ -326,7 +327,7 @@ func (rc *RestoreController) restoreSchema(ctx context.Context) error {
 			for _, tblMeta := range dbMeta.Tables {
 				tablesSchema[tblMeta.Name] = tblMeta.GetSchema(ctx, rc.store)
 			}
-			err := InitSchema(ctx, rc.tidbGlue, dbMeta.Name, tablesSchema)
+			err = InitSchema(ctx, rc.tidbGlue, dbMeta.Name, tablesSchema)
 
 			task.End(zap.ErrorLevel, err)
 			if err != nil {
@@ -343,7 +344,7 @@ func (rc *RestoreController) restoreSchema(ctx context.Context) error {
 				for _, viewMeta := range dbMeta.Views {
 					viewsSchema[viewMeta.Name] = viewMeta.GetSchema(ctx, rc.store)
 				}
-				err := InitSchema(ctx, rc.tidbGlue, dbMeta.Name, viewsSchema)
+				err = InitSchema(ctx, rc.tidbGlue, dbMeta.Name, viewsSchema)
 
 				task.End(zap.ErrorLevel, err)
 				if err != nil {
@@ -353,6 +354,7 @@ func (rc *RestoreController) restoreSchema(ctx context.Context) error {
 
 		}
 		viewLogTask.End(zap.ErrorLevel, nil)
+		logTask.End(zap.InfoLevel, err)
 	}
 	getTableFunc := rc.backend.FetchRemoteTableModels
 	if !rc.tidbGlue.OwnsSQLExecutor() {
@@ -380,7 +382,6 @@ func (rc *RestoreController) restoreSchema(ctx context.Context) error {
 
 	// Estimate the number of chunks for progress reporting
 	err = rc.estimateChunkCountIntoMetrics(ctx)
-	logTask.End(zap.InfoLevel, err)
 	return err
 }
 
