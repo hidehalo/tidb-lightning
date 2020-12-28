@@ -418,22 +418,23 @@ func (worker *restoreSchemaWorker) doJob() {
 		case <-worker.ctx.Done():
 			return
 		case job := <-worker.jobCh:
+			logTask := log.L().Begin(zap.InfoLevel, "restore schema job")
 			if job == nil {
 				return
 			}
 			session := worker.getSession()
-			var logger log.Logger
+			// var logger log.Logger
 			for _, stmt := range job.stmts {
-				if stmt.stmtType == schemaCreateDatabase {
-					logger = log.With(zap.String("db", job.dbName))
-				} else if stmt.stmtType == schemaCreateTable {
-					logger = log.With(zap.String("table", common.UniqueTable(job.dbName, stmt.tblName)))
-				} else if stmt.stmtType == schemaCreateView {
-					logger = log.With(zap.String("table", common.UniqueTable(job.dbName, stmt.tblName)))
-				}
-				task := logger.Begin(zap.DebugLevel, fmt.Sprintf("execute SQL: %s", stmt.sql))
+				// if stmt.stmtType == schemaCreateDatabase {
+				// 	logger = log.With(zap.String("db", job.dbName))
+				// } else if stmt.stmtType == schemaCreateTable {
+				// 	logger = log.With(zap.String("table", common.UniqueTable(job.dbName, stmt.tblName)))
+				// } else if stmt.stmtType == schemaCreateView {
+				// 	logger = log.With(zap.String("table", common.UniqueTable(job.dbName, stmt.tblName)))
+				// }
+				// task := logger.Begin(zap.DebugLevel, fmt.Sprintf("execute SQL: %s", stmt.sql))
 				_, err := session.Execute(worker.ctx, stmt.sql)
-				task.End(zap.ErrorLevel, err)
+				// task.End(zap.ErrorLevel, err)
 				if err != nil {
 					switch stmt.stmtType {
 					case schemaCreateDatabase:
@@ -450,6 +451,7 @@ func (worker *restoreSchemaWorker) doJob() {
 			}
 			worker.recycleSession(session)
 			worker.wg.Done()
+			logTask.End(zap.ErrorLevel, nil)
 		}
 	}
 }

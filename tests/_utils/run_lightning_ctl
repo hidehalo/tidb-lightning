@@ -21,7 +21,7 @@ bin/tidb-lightning-ctl.test -test.coverprofile="$TEST_DIR/cov.ctl.$TEST_NAME.$$.
     --cert "$TEST_DIR/tls/lightning.pem" \
     --key "$TEST_DIR/tls/lightning.key" \
     --log-file "$TEST_DIR/lightning.log" \
-    --tidb-port 4000 \
+    --tidb-port 3390 \
     --pd-urls '127.0.0.1:2379' \
     -d "tests/$TEST_NAME/data" \
     --importer '127.0.0.1:8808' \
