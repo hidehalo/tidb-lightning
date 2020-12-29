@@ -314,14 +314,14 @@ const (
 )
 
 type schemaJob struct {
-	dbName string
-	stmts  []*schemaStmt
+	dbName   string
+	tblName  string
+	stmtType schemaStmtType
+	stmts    []*schemaStmt
 }
 
 type schemaStmt struct {
-	tblName  string
-	stmtType schemaStmtType
-	sql      string
+	sql string
 }
 
 type restoreSchemaWorker struct {
@@ -342,13 +342,13 @@ func (worker *restoreSchemaWorker) makeJobs(dbMetas []*mydump.MDDatabaseMeta) {
 		// 1. restore databases, execute statements concurrency
 		for _, dbMeta := range dbMetas {
 			restoreSchemaJob := &schemaJob{
-				dbName: dbMeta.Name,
-				stmts:  make([]*schemaStmt, 0, 1),
+				dbName:   dbMeta.Name,
+				stmtType: schemaCreateDatabase,
+				stmts:    make([]*schemaStmt, 0, 1),
 			}
 			worker.wg.Add(1)
 			restoreSchemaJob.stmts = append(restoreSchemaJob.stmts, &schemaStmt{
-				stmtType: schemaCreateDatabase,
-				sql:      createDatabaseIfNotExistStmt(dbMeta.Name),
+				sql: createDatabaseIfNotExistStmt(dbMeta.Name),
 			})
 			worker.jobCh <- restoreSchemaJob
 		}
@@ -364,18 +364,14 @@ func (worker *restoreSchemaWorker) makeJobs(dbMetas []*mydump.MDDatabaseMeta) {
 						return
 					}
 					restoreSchemaJob := &schemaJob{
-						dbName: dbMeta.Name,
-						stmts:  make([]*schemaStmt, 0, len(stmts)),
-					}
-					restoreSchemaJob := &schemaJob{
-						dbName: dbMeta.Name,
-						stmts:  make([]*schemaStmt, 0, len(stmts)),
+						dbName:   dbMeta.Name,
+						tblName:  tblMeta.Name,
+						stmtType: schemaCreateTable,
+						stmts:    make([]*schemaStmt, 0, len(stmts)),
 					}
 					for _, sql := range stmts {
 						restoreSchemaJob.stmts = append(restoreSchemaJob.stmts, &schemaStmt{
-							tblName:  tblMeta.Name,
-							stmtType: schemaCreateTable,
-							sql:      sql,
+							sql: sql,
 						})
 					}
 					worker.wg.Add(1)
@@ -386,10 +382,6 @@ func (worker *restoreSchemaWorker) makeJobs(dbMetas []*mydump.MDDatabaseMeta) {
 		worker.wg.Wait()
 		// 3. restore views. Since views can cross database we must restore views after all table schemas are restored.
 		for _, dbMeta := range dbMetas {
-			restoreSchemaJob := &schemaJob{
-				dbName: dbMeta.Name,
-				stmts:  make([]*schemaStmt, 0), // sadly, we can't pre-alloc precise value of cap
-			}
 			for _, viewMeta := range dbMeta.Views {
 				sql := viewMeta.GetSchema(worker.ctx, worker.store)
 				if sql != "" {
@@ -398,19 +390,23 @@ func (worker *restoreSchemaWorker) makeJobs(dbMetas []*mydump.MDDatabaseMeta) {
 						worker.throw(err)
 						return
 					}
+					restoreSchemaJob := &schemaJob{
+						dbName:   dbMeta.Name,
+						tblName:  viewMeta.Name,
+						stmtType: schemaCreateView,
+						stmts:    make([]*schemaStmt, 0, len(stmts)), // sadly, we can't pre-alloc precise value of cap
+					}
 					for _, sql := range stmts {
 						restoreSchemaJob.stmts = append(restoreSchemaJob.stmts, &schemaStmt{
-							tblName:  viewMeta.Name,
-							stmtType: schemaCreateView,
-							sql:      sql,
+							sql: sql,
 						})
 					}
+					worker.wg.Add(1)
+					worker.jobCh <- restoreSchemaJob
+					// we don't support restore views concurrency, cauz it maybe will raise a error
+					worker.wg.Wait()
 				}
 			}
-			worker.wg.Add(1)
-			worker.jobCh <- restoreSchemaJob
-			// we don't support restore views concurrency, cauz it maybe will raise a error
-			worker.wg.Wait()
 		}
 		worker.quit()
 	}
@@ -440,25 +436,26 @@ func (worker *restoreSchemaWorker) doJob() {
 					return
 				}
 			}
+			if job.stmtType == schemaCreateDatabase {
+				logger = log.With(zap.String("db", job.dbName))
+			} else if job.stmtType == schemaCreateTable {
+				logger = log.With(zap.String("table", common.UniqueTable(job.dbName, job.tblName)))
+			} else if job.stmtType == schemaCreateView {
+				logger = log.With(zap.String("table", common.UniqueTable(job.dbName, job.tblName)))
+			}
 			for _, stmt := range job.stmts {
-				if stmt.stmtType == schemaCreateDatabase {
-					logger = log.With(zap.String("db", job.dbName))
-				} else if stmt.stmtType == schemaCreateTable {
-					logger = log.With(zap.String("table", common.UniqueTable(job.dbName, stmt.tblName)))
-				} else if stmt.stmtType == schemaCreateView {
-					logger = log.With(zap.String("table", common.UniqueTable(job.dbName, stmt.tblName)))
-				}
+
 				task := logger.Begin(zap.DebugLevel, fmt.Sprintf("execute SQL: %s", stmt.sql))
 				_, err = session.Execute(worker.ctx, stmt.sql)
 				task.End(zap.ErrorLevel, err)
 				if err != nil {
-					switch stmt.stmtType {
+					switch job.stmtType {
 					case schemaCreateDatabase:
 						err = errors.Annotatef(err, "restore database schema %s failed", job.dbName)
 					case schemaCreateTable:
-						err = errors.Annotatef(err, "restore table schema %s failed", stmt.tblName)
+						err = errors.Annotatef(err, "restore table schema %s failed", job.tblName)
 					case schemaCreateView:
-						err = errors.Annotatef(err, "restore view schema %s failed", stmt.tblName)
+						err = errors.Annotatef(err, "restore view schema %s failed", job.tblName)
 					}
 					worker.wg.Done()
 					worker.throw(err)
