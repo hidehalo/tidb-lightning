@@ -487,6 +487,7 @@ func (worker *restoreSchemaWorker) throw(err error) {
 
 func (rc *RestoreController) restoreSchema(ctx context.Context) error {
 	if !rc.cfg.Mydumper.NoSchema {
+		logTask := log.L().Begin(zap.InfoLevel, "restore all schema")
 		concurrency := 16
 		childCtx, cancel := context.WithCancel(ctx)
 		worker := restoreSchemaWorker{
@@ -502,6 +503,7 @@ func (rc *RestoreController) restoreSchema(ctx context.Context) error {
 			go worker.doJob()
 		}
 		err := worker.wait()
+		logTask.End(zap.ErrorLevel, err)
 		if err != nil {
 			return err
 		}
