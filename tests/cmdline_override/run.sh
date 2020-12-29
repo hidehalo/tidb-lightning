@@ -6,7 +6,7 @@ run_lightning \
     -L info \
     --log-file "$TEST_DIR/lightning.log" \
     --tidb-host 127.0.0.1 \
-    --tidb-port 4000 \
+    --tidb-port 3390 \
     --tidb-user root \
     --tidb-status 10080 \
     --pd-urls 127.0.0.1:2379 \
