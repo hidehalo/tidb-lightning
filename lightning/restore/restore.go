@@ -309,6 +309,7 @@ outside:
 
 func (rc *RestoreController) restoreSchema(ctx context.Context) error {
 	if !rc.cfg.Mydumper.NoSchema {
+		logTask := log.L().Begin(zap.InfoLevel, "restore all schema")
 		if rc.tidbGlue.OwnsSQLExecutor() {
 			db, err := DBFromConfig(rc.cfg.TiDB)
 			if err != nil {
@@ -350,6 +351,7 @@ func (rc *RestoreController) restoreSchema(ctx context.Context) error {
 			}
 
 		}
+		logTask.End(zap.ErrorLevel, nil)
 	}
 	getTableFunc := rc.backend.FetchRemoteTableModels
 	if !rc.tidbGlue.OwnsSQLExecutor() {
