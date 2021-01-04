@@ -349,6 +349,7 @@ type restoreSchemaWorker struct {
 
 func (worker *restoreSchemaWorker) makeJobs(dbMetas []*mydump.MDDatabaseMeta) error {
 	defer func() {
+		fmt.Println("Quit")
 		close(worker.jobCh)
 		worker.quit()
 	}()
@@ -492,6 +493,8 @@ loop:
 }
 
 func (worker *restoreSchemaWorker) wait() error {
+	fmt.Println("Wait")
+
 	// avoid to `worker.wg.Wait()` blocked forever when all `doJob`'s goroutine exited.
 	// don't worry about goroutine below, it never become a zombie,
 	// cauz we have mechanism to clean cancelled jobs in `worker.jobCh`.
@@ -512,6 +515,8 @@ func (worker *restoreSchemaWorker) wait() error {
 }
 
 func (worker *restoreSchemaWorker) throw(err error) {
+	fmt.Println("throw")
+
 	select {
 	case <-worker.ctx.Done():
 		// don't throw `worker.ctx.Err()` again, it will be blocked to death.
@@ -522,6 +527,8 @@ func (worker *restoreSchemaWorker) throw(err error) {
 }
 
 func (worker *restoreSchemaWorker) appendJob(job *schemaJob) error {
+	fmt.Println("appendJob")
+
 	worker.wg.Add(1)
 	select {
 	case err := <-worker.errCh:
@@ -552,8 +559,10 @@ func (rc *RestoreController) restoreSchema(ctx context.Context) error {
 			store: rc.store,
 		}
 		for i := 0; i < concurrency; i++ {
+			fmt.Println("start consumer procedure", i)
 			go worker.doJob()
 		}
+		fmt.Println("start producer procedure")
 		err := worker.makeJobs(rc.dbMetas)
 		logTask.End(zap.ErrorLevel, err)
 		if err != nil {
