@@ -15,6 +15,7 @@ package restore
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"io/ioutil"
 	"path/filepath"
@@ -35,7 +36,9 @@ import (
 	"github.com/pingcap/tidb-lightning/lightning/glue"
 	filter "github.com/pingcap/tidb-tools/pkg/table-filter"
 	"github.com/pingcap/tidb/ddl"
+	"github.com/pingcap/tidb/types"
 	tmock "github.com/pingcap/tidb/util/mock"
+	"github.com/pingcap/tidb/util/sqlexec"
 
 	kv "github.com/pingcap/tidb-lightning/lightning/backend"
 	"github.com/pingcap/tidb-lightning/lightning/checkpoints"
@@ -1075,4 +1078,191 @@ func (s *chunkRestoreSuite) TestRestore(c *C) {
 	})
 	c.Assert(err, IsNil)
 	c.Assert(saveCpCh, HasLen, 2)
+}
+
+type mockSession struct {
+	checkpoints.Session
+}
+
+func (s *mockSession) Close() {}
+
+func (s *mockSession) Execute(context.Context, string) ([]sqlexec.RecordSet, error) {
+	return nil, nil
+}
+
+func (s *mockSession) CommitTxn(context.Context) error {
+	return errors.New("mockSession doesn't implement `CommitTxn`")
+}
+
+func (s *mockSession) RollbackTxn(context.Context) {}
+
+func (s *mockSession) PrepareStmt(sql string) (stmtID uint32, paramCount int, fields []*ast.ResultField, err error) {
+	err = errors.New("mockSession doesn't implement `PrepareStmt`")
+	return
+}
+
+func (s *mockSession) ExecutePreparedStmt(ctx context.Context, stmtID uint32, param []types.Datum) (sqlexec.RecordSet, error) {
+	return nil, errors.New("mockSession doesn't implement `ExecutePreparedStmt`")
+}
+
+func (s *mockSession) DropPreparedStmt(stmtID uint32) error {
+	return errors.New("mockSession doesn't implement `DropPreparedStmt`")
+}
+
+type mockTiDBGlue struct {
+	glue.Glue
+	glue.SQLExecutor
+	parser *parser.Parser
+}
+
+func (g *mockTiDBGlue) OwnsSQLExecutor() bool {
+	return true
+}
+
+func (g *mockTiDBGlue) GetSQLExecutor() glue.SQLExecutor {
+	return g
+}
+
+func (g *mockTiDBGlue) GetDB() (*sql.DB, error) {
+	return nil, errors.New("mockTiDBGlue doesn't implement `GetDB`")
+}
+
+func (g *mockTiDBGlue) GetParser() *parser.Parser {
+	return g.parser
+}
+func (g *mockTiDBGlue) GetTables(context.Context, string) ([]*model.TableInfo, error) {
+	return nil, errors.New("mockTiDBGlue doesn't implement `GetTables`")
+}
+
+func (g *mockTiDBGlue) GetSession(context.Context) (checkpoints.Session, error) {
+	return &mockSession{}, nil
+}
+
+func (g *mockTiDBGlue) OpenCheckpointsDB(context.Context, *config.Config) (checkpoints.CheckpointsDB, error) {
+	return nil, errors.New("mockTiDBGlue doesn't implement `OpenCheckpointsDB`")
+}
+
+func (g *mockTiDBGlue) Record(string, uint64) {}
+
+func (g *mockTiDBGlue) ExecuteWithLog(ctx context.Context, query string, purpose string, logger log.Logger) error {
+	return nil
+}
+
+func (g *mockTiDBGlue) ObtainStringWithLog(ctx context.Context, query string, purpose string, logger log.Logger) (string, error) {
+	return "", nil
+}
+
+func (g *mockTiDBGlue) QueryStringsWithLog(ctx context.Context, query string, purpose string, logger log.Logger) ([][]string, error) {
+	return nil, nil
+}
+
+func (g *mockTiDBGlue) Close() {}
+
+var _ = Suite(&restoreSchemaSuite{})
+
+type restoreSchemaSuite struct {
+	rc         *RestoreController
+	glue       glue.Glue
+	dbMetas    []*mydump.MDDatabaseMeta
+	store      storage.ExternalStorage
+	controller *gomock.Controller
+}
+
+func (s *restoreSchemaSuite) SetUpSuite(c *C) {
+	s.glue = &mockTiDBGlue{}
+	// Write some sample SQL dump
+	fakeDataDir := c.MkDir()
+	store, err := storage.NewLocalStorage(fakeDataDir)
+	c.Assert(err, IsNil)
+	s.store = store
+	// restore database schema file
+	fakeDBName := "fake_db"
+	fakeDBMeta := &mydump.MDDatabaseMeta{
+		Name:       fakeDBName,
+		SchemaFile: filepath.Join(fakeDataDir, fakeDBName),
+	}
+	err = ioutil.WriteFile(fakeDBMeta.SchemaFile,
+		[]byte(fmt.Sprintf("CREATE DATABASE %s;", fakeDBName)), 0644)
+	c.Assert(err, IsNil)
+	// restore table schema files
+	fakeTableFilesCount := 6
+	for i := 1; i <= fakeTableFilesCount; i++ {
+		fakeTableName := fmt.Sprintf("tbl%d", i)
+		fakeFileName := fmt.Sprintf("%s.%s.sql", fakeDBName, fakeTableName)
+		fakeFilePath := filepath.Join(fakeDataDir, fakeFileName)
+		fakeFileContent := []byte(fmt.Sprintf("CREATE TABLE %s(i TINYINT);", fakeTableName))
+		fakeTableSize := int64(len(fakeFileContent))
+		err = ioutil.WriteFile(fakeFilePath, fakeFileContent, 0644)
+		c.Assert(err, IsNil)
+		fakeDBMeta.Tables = append(fakeDBMeta.Tables, &mydump.MDTableMeta{
+			DB:        fakeDBName,
+			Name:      fakeTableName,
+			TotalSize: fakeTableSize,
+			SchemaFile: mydump.FileInfo{TableName: filter.Table{Schema: fakeDBName, Name: fakeTableName},
+				FileMeta: mydump.SourceFileMeta{Path: fakeFilePath,
+					Type: mydump.SourceTypeTableSchema}},
+		})
+	}
+	// restore view schema files
+	fakeViewFilesCount := 6
+	for i := 1; i <= fakeViewFilesCount; i++ {
+		fakeViewName := fmt.Sprintf("view%d", i)
+		fakeFileName := fmt.Sprintf("%s.%s.sql", fakeDBName, fakeViewName)
+		fakeFilePath := filepath.Join(fakeDataDir, fakeFileName)
+		fakeFileContent := []byte(fmt.Sprintf("CREATE ALGORITHM=UNDEFINED VIEW `%s` (`i`) AS SELECT `i` FROM `%s`.`%s`;", fakeViewName, fakeDBName, fmt.Sprintf("tbl%d", i)))
+		fakeViewSize := int64(len(fakeFileContent))
+		err = ioutil.WriteFile(fakeFilePath, fakeFileContent, 0644)
+		c.Assert(err, IsNil)
+		fakeDBMeta.Views = append(fakeDBMeta.Views, &mydump.MDTableMeta{
+			DB:        fakeDBName,
+			Name:      fakeViewName,
+			TotalSize: fakeViewSize,
+			SchemaFile: mydump.FileInfo{TableName: filter.Table{Schema: fakeDBName, Name: fakeViewName},
+				FileMeta: mydump.SourceFileMeta{Path: fakeFilePath,
+					Type: mydump.SourceTypeViewSchema}},
+		})
+	}
+	s.dbMetas = append(s.dbMetas, fakeDBMeta)
+}
+
+func (s *restoreSchemaSuite) SetUpTest(c *C) {
+	cfg := config.NewConfig()
+	cfg.Mydumper.NoSchema = false
+	s.controller = gomock.NewController(c)
+	mockBackend := mock.NewMockBackend(s.controller)
+	mockBackend.EXPECT().
+		FetchRemoteTableModels(gomock.Any(), gomock.Any()).
+		AnyTimes().
+		Return(make([]*model.TableInfo, 0), nil)
+	s.rc = &RestoreController{
+		cfg:      cfg,
+		dbMetas:  s.dbMetas,
+		tidbGlue: s.glue,
+		store:    s.store,
+		backend:  kv.MakeBackend(mockBackend),
+	}
+}
+
+func (s *restoreSchemaSuite) TearDownTest(c *C) {
+	s.controller.Finish()
+}
+
+func (s *restoreSchemaSuite) TestRestoreSchemaSuccessful(c *C) {
+	ctx := context.Background()
+	err := s.rc.restoreSchema(ctx)
+	c.Assert(err, IsNil)
+}
+
+func (s *restoreSchemaSuite) TestRestoreSchemaFailed(c *C) {
+	ctx := context.Background()
+	err := s.rc.restoreSchema(ctx)
+	c.Assert(err, NotNil)
+}
+
+func (s *restoreSchemaSuite) TestRestoreSchemaContextCancel(c *C) {
+	ctx := context.Background()
+	childCtx, cancel := context.WithCancel(ctx)
+	cancel()
+	err := s.rc.restoreSchema(childCtx)
+	c.Assert(err, NotNil)
 }
