@@ -15,7 +15,6 @@ package restore
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"io/ioutil"
 	"path/filepath"
@@ -36,9 +35,7 @@ import (
 	"github.com/pingcap/tidb-lightning/lightning/glue"
 	filter "github.com/pingcap/tidb-tools/pkg/table-filter"
 	"github.com/pingcap/tidb/ddl"
-	"github.com/pingcap/tidb/types"
 	tmock "github.com/pingcap/tidb/util/mock"
-	"github.com/pingcap/tidb/util/sqlexec"
 
 	kv "github.com/pingcap/tidb-lightning/lightning/backend"
 	"github.com/pingcap/tidb-lightning/lightning/checkpoints"
@@ -1080,97 +1077,17 @@ func (s *chunkRestoreSuite) TestRestore(c *C) {
 	c.Assert(saveCpCh, HasLen, 2)
 }
 
-type mockSession struct {
-	checkpoints.Session
-}
-
-func (s *mockSession) Close() {}
-
-func (s *mockSession) Execute(context.Context, string) ([]sqlexec.RecordSet, error) {
-	return nil, nil
-}
-
-func (s *mockSession) CommitTxn(context.Context) error {
-	return errors.New("mockSession doesn't implement `CommitTxn`")
-}
-
-func (s *mockSession) RollbackTxn(context.Context) {}
-
-func (s *mockSession) PrepareStmt(sql string) (stmtID uint32, paramCount int, fields []*ast.ResultField, err error) {
-	err = errors.New("mockSession doesn't implement `PrepareStmt`")
-	return
-}
-
-func (s *mockSession) ExecutePreparedStmt(ctx context.Context, stmtID uint32, param []types.Datum) (sqlexec.RecordSet, error) {
-	return nil, errors.New("mockSession doesn't implement `ExecutePreparedStmt`")
-}
-
-func (s *mockSession) DropPreparedStmt(stmtID uint32) error {
-	return errors.New("mockSession doesn't implement `DropPreparedStmt`")
-}
-
-type mockTiDBGlue struct {
-	glue.Glue
-	glue.SQLExecutor
-	parser *parser.Parser
-}
-
-func (g *mockTiDBGlue) OwnsSQLExecutor() bool {
-	return true
-}
-
-func (g *mockTiDBGlue) GetSQLExecutor() glue.SQLExecutor {
-	return g
-}
-
-func (g *mockTiDBGlue) GetDB() (*sql.DB, error) {
-	return nil, errors.New("mockTiDBGlue doesn't implement `GetDB`")
-}
-
-func (g *mockTiDBGlue) GetParser() *parser.Parser {
-	return g.parser
-}
-func (g *mockTiDBGlue) GetTables(context.Context, string) ([]*model.TableInfo, error) {
-	return nil, errors.New("mockTiDBGlue doesn't implement `GetTables`")
-}
-
-func (g *mockTiDBGlue) GetSession(context.Context) (checkpoints.Session, error) {
-	return &mockSession{}, nil
-}
-
-func (g *mockTiDBGlue) OpenCheckpointsDB(context.Context, *config.Config) (checkpoints.CheckpointsDB, error) {
-	return nil, errors.New("mockTiDBGlue doesn't implement `OpenCheckpointsDB`")
-}
-
-func (g *mockTiDBGlue) Record(string, uint64) {}
-
-func (g *mockTiDBGlue) ExecuteWithLog(ctx context.Context, query string, purpose string, logger log.Logger) error {
-	return nil
-}
-
-func (g *mockTiDBGlue) ObtainStringWithLog(ctx context.Context, query string, purpose string, logger log.Logger) (string, error) {
-	return "", nil
-}
-
-func (g *mockTiDBGlue) QueryStringsWithLog(ctx context.Context, query string, purpose string, logger log.Logger) ([][]string, error) {
-	return nil, nil
-}
-
-func (g *mockTiDBGlue) Close() {}
-
 var _ = Suite(&restoreSchemaSuite{})
 
 type restoreSchemaSuite struct {
+	ctx        context.Context
 	rc         *RestoreController
-	glue       glue.Glue
 	dbMetas    []*mydump.MDDatabaseMeta
 	store      storage.ExternalStorage
 	controller *gomock.Controller
 }
 
 func (s *restoreSchemaSuite) SetUpSuite(c *C) {
-	s.glue = &mockTiDBGlue{}
-	// Write some sample SQL dump
 	fakeDataDir := c.MkDir()
 	store, err := storage.NewLocalStorage(fakeDataDir)
 	c.Assert(err, IsNil)
@@ -1226,20 +1143,47 @@ func (s *restoreSchemaSuite) SetUpSuite(c *C) {
 }
 
 func (s *restoreSchemaSuite) SetUpTest(c *C) {
-	cfg := config.NewConfig()
-	cfg.Mydumper.NoSchema = false
+	s.ctx = context.Background()
 	s.controller = gomock.NewController(c)
 	mockBackend := mock.NewMockBackend(s.controller)
+	// We don't care the execute results of those
 	mockBackend.EXPECT().
 		FetchRemoteTableModels(gomock.Any(), gomock.Any()).
 		AnyTimes().
 		Return(make([]*model.TableInfo, 0), nil)
+	mockSQLExecutor := mock.NewMockSQLExecutor(s.controller)
+	mockSQLExecutor.EXPECT().
+		ExecuteWithLog(s.ctx, gomock.Any(), gomock.Any(), gomock.Any()).
+		AnyTimes().
+		Return(nil)
+	mockSession := mock.NewMockSession(s.controller)
+	mockSession.EXPECT().
+		Close().
+		AnyTimes().
+		Return()
+	mockSession.EXPECT().
+		Execute(s.ctx, gomock.Any()).
+		AnyTimes().
+		Return(nil, nil)
+	mockTiDBGlue := mock.NewMockGlue(s.controller)
+	mockTiDBGlue.EXPECT().
+		GetSQLExecutor().
+		AnyTimes().
+		Return(mockSQLExecutor)
+	mockTiDBGlue.EXPECT().
+		GetSession(s.ctx).
+		AnyTimes().
+		Return(mockSession, nil)
+	cfg := config.NewConfig()
+	cfg.Mydumper.NoSchema = false
+	cfg.App.RegionConcurrency = 8
 	s.rc = &RestoreController{
-		cfg:      cfg,
-		dbMetas:  s.dbMetas,
-		tidbGlue: s.glue,
-		store:    s.store,
-		backend:  kv.MakeBackend(mockBackend),
+		cfg:           cfg,
+		dbMetas:       s.dbMetas,
+		tidbGlue:      mockTiDBGlue,
+		store:         s.store,
+		backend:       kv.MakeBackend(mockBackend),
+		checkpointsDB: &checkpoints.NullCheckpointsDB{},
 	}
 }
 
@@ -1248,21 +1192,52 @@ func (s *restoreSchemaSuite) TearDownTest(c *C) {
 }
 
 func (s *restoreSchemaSuite) TestRestoreSchemaSuccessful(c *C) {
-	ctx := context.Background()
-	err := s.rc.restoreSchema(ctx)
+	err := s.rc.restoreSchema(s.ctx)
 	c.Assert(err, IsNil)
 }
 
 func (s *restoreSchemaSuite) TestRestoreSchemaFailed(c *C) {
-	ctx := context.Background()
-	err := s.rc.restoreSchema(ctx)
+	injectErr := errors.New("Somthing wrong")
+	mockSession := mock.NewMockSession(s.controller)
+	mockSession.EXPECT().
+		Close().
+		AnyTimes().
+		Return()
+	mockSession.EXPECT().
+		Execute(s.ctx, gomock.Any()).
+		AnyTimes().
+		Return(nil, injectErr)
+	mockTiDBGlue := mock.NewMockGlue(s.controller)
+	mockTiDBGlue.EXPECT().
+		GetSession(s.ctx).
+		AnyTimes().
+		Return(mockSession, nil)
+	s.rc.tidbGlue = mockTiDBGlue
+	err := s.rc.restoreSchema(s.ctx)
 	c.Assert(err, NotNil)
+	c.Assert(err, Equals, injectErr)
 }
 
 func (s *restoreSchemaSuite) TestRestoreSchemaContextCancel(c *C) {
-	ctx := context.Background()
-	childCtx, cancel := context.WithCancel(ctx)
-	cancel()
+	childCtx, cancel := context.WithCancel(s.ctx)
+	mockSession := mock.NewMockSession(s.controller)
+	mockSession.EXPECT().
+		Close().
+		AnyTimes().
+		Return()
+	mockSession.EXPECT().
+		Execute(childCtx, gomock.Any()).
+		AnyTimes().
+		Do(cancel).
+		Return(nil, nil)
+	mockTiDBGlue := mock.NewMockGlue(s.controller)
+	mockTiDBGlue.EXPECT().
+		GetSession(childCtx).
+		AnyTimes().
+		Return(mockSession, nil)
+	s.rc.tidbGlue = mockTiDBGlue
 	err := s.rc.restoreSchema(childCtx)
+	cancel()
 	c.Assert(err, NotNil)
+	c.Assert(err, Equals, childCtx.Err())
 }

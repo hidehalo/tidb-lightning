@@ -348,7 +348,10 @@ type restoreSchemaWorker struct {
 }
 
 func (worker *restoreSchemaWorker) makeJobs(dbMetas []*mydump.MDDatabaseMeta) error {
-	defer close(worker.jobCh)
+	defer func() {
+		close(worker.jobCh)
+		worker.quit()
+	}()
 	var err error
 	// 1. restore databases, execute statements concurrency
 	for _, dbMeta := range dbMetas {
@@ -536,6 +539,7 @@ func (worker *restoreSchemaWorker) appendJob(job *schemaJob) error {
 
 func (rc *RestoreController) restoreSchema(ctx context.Context) error {
 	if !rc.cfg.Mydumper.NoSchema {
+		fmt.Println("restore all schema")
 		logTask := log.L().Begin(zap.InfoLevel, "restore all schema")
 		concurrency := utils.MinInt(rc.cfg.App.RegionConcurrency, 8)
 		childCtx, cancel := context.WithCancel(ctx)
