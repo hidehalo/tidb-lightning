@@ -1102,7 +1102,7 @@ func (s *restoreSchemaSuite) SetUpSuite(c *C) {
 		[]byte(fmt.Sprintf("CREATE DATABASE %s;", fakeDBName)), 0644)
 	c.Assert(err, IsNil)
 	// restore table schema files
-	fakeTableFilesCount := 6
+	fakeTableFilesCount := 8
 	for i := 1; i <= fakeTableFilesCount; i++ {
 		fakeTableName := fmt.Sprintf("tbl%d", i)
 		fakeFileName := fmt.Sprintf("%s.%s.sql", fakeDBName, fakeTableName)
@@ -1116,12 +1116,13 @@ func (s *restoreSchemaSuite) SetUpSuite(c *C) {
 			Name:      fakeTableName,
 			TotalSize: fakeTableSize,
 			SchemaFile: mydump.FileInfo{TableName: filter.Table{Schema: fakeDBName, Name: fakeTableName},
-				FileMeta: mydump.SourceFileMeta{Path: fakeFilePath,
-					Type: mydump.SourceTypeTableSchema}},
+				FileMeta: mydump.SourceFileMeta{Path: fakeFilePath, Type: mydump.SourceTypeTableSchema},
+				// FileInfo:
+			},
 		})
 	}
 	// restore view schema files
-	fakeViewFilesCount := 6
+	fakeViewFilesCount := 8
 	for i := 1; i <= fakeViewFilesCount; i++ {
 		fakeViewName := fmt.Sprintf("view%d", i)
 		fakeFileName := fmt.Sprintf("%s.%s.sql", fakeDBName, fakeViewName)
@@ -1135,16 +1136,16 @@ func (s *restoreSchemaSuite) SetUpSuite(c *C) {
 			Name:      fakeViewName,
 			TotalSize: fakeViewSize,
 			SchemaFile: mydump.FileInfo{TableName: filter.Table{Schema: fakeDBName, Name: fakeViewName},
-				FileMeta: mydump.SourceFileMeta{Path: fakeFilePath,
-					Type: mydump.SourceTypeViewSchema}},
+				FileMeta: mydump.SourceFileMeta{Path: fakeFilePath, Type: mydump.SourceTypeViewSchema},
+				// FileInfo:
+			},
 		})
 	}
 	s.dbMetas = append(s.dbMetas, fakeDBMeta)
 }
 
 func (s *restoreSchemaSuite) SetUpTest(c *C) {
-	s.ctx = context.Background()
-	s.controller = gomock.NewController(c)
+	s.controller, s.ctx = gomock.WithContext(context.Background(), c)
 	mockBackend := mock.NewMockBackend(s.controller)
 	// We don't care the execute results of those
 	mockBackend.EXPECT().
@@ -1153,7 +1154,7 @@ func (s *restoreSchemaSuite) SetUpTest(c *C) {
 		Return(make([]*model.TableInfo, 0), nil)
 	mockSQLExecutor := mock.NewMockSQLExecutor(s.controller)
 	mockSQLExecutor.EXPECT().
-		ExecuteWithLog(s.ctx, gomock.Any(), gomock.Any(), gomock.Any()).
+		ExecuteWithLog(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
 		AnyTimes().
 		Return(nil)
 	mockSession := mock.NewMockSession(s.controller)
@@ -1162,7 +1163,7 @@ func (s *restoreSchemaSuite) SetUpTest(c *C) {
 		AnyTimes().
 		Return()
 	mockSession.EXPECT().
-		Execute(s.ctx, gomock.Any()).
+		Execute(gomock.Any(), gomock.Any()).
 		AnyTimes().
 		Return(nil, nil)
 	mockTiDBGlue := mock.NewMockGlue(s.controller)
@@ -1171,9 +1172,18 @@ func (s *restoreSchemaSuite) SetUpTest(c *C) {
 		AnyTimes().
 		Return(mockSQLExecutor)
 	mockTiDBGlue.EXPECT().
-		GetSession(s.ctx).
+		GetSession(gomock.Any()).
 		AnyTimes().
 		Return(mockSession, nil)
+	mockTiDBGlue.EXPECT().
+		OwnsSQLExecutor().
+		AnyTimes().
+		Return(true)
+	parser := parser.New()
+	mockTiDBGlue.EXPECT().
+		GetParser().
+		AnyTimes().
+		Return(parser)
 	cfg := config.NewConfig()
 	cfg.Mydumper.NoSchema = false
 	cfg.App.RegionConcurrency = 8
@@ -1204,18 +1214,18 @@ func (s *restoreSchemaSuite) TestRestoreSchemaFailed(c *C) {
 		AnyTimes().
 		Return()
 	mockSession.EXPECT().
-		Execute(s.ctx, gomock.Any()).
+		Execute(gomock.Any(), gomock.Any()).
 		AnyTimes().
 		Return(nil, injectErr)
 	mockTiDBGlue := mock.NewMockGlue(s.controller)
 	mockTiDBGlue.EXPECT().
-		GetSession(s.ctx).
+		GetSession(gomock.Any()).
 		AnyTimes().
 		Return(mockSession, nil)
 	s.rc.tidbGlue = mockTiDBGlue
 	err := s.rc.restoreSchema(s.ctx)
 	c.Assert(err, NotNil)
-	c.Assert(err, Equals, injectErr)
+	c.Assert(errors.ErrorEqual(err, injectErr), IsTrue)
 }
 
 func (s *restoreSchemaSuite) TestRestoreSchemaContextCancel(c *C) {
@@ -1226,13 +1236,13 @@ func (s *restoreSchemaSuite) TestRestoreSchemaContextCancel(c *C) {
 		AnyTimes().
 		Return()
 	mockSession.EXPECT().
-		Execute(childCtx, gomock.Any()).
+		Execute(gomock.Any(), gomock.Any()).
 		AnyTimes().
-		Do(cancel).
+		Do(func(context.Context, string) { cancel() }).
 		Return(nil, nil)
 	mockTiDBGlue := mock.NewMockGlue(s.controller)
 	mockTiDBGlue.EXPECT().
-		GetSession(childCtx).
+		GetSession(gomock.Any()).
 		AnyTimes().
 		Return(mockSession, nil)
 	s.rc.tidbGlue = mockTiDBGlue
