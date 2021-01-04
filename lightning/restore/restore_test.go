@@ -1076,3 +1076,168 @@ func (s *chunkRestoreSuite) TestRestore(c *C) {
 	c.Assert(err, IsNil)
 	c.Assert(saveCpCh, HasLen, 2)
 }
+
+var _ = Suite(&restoreSchemaSuite{})
+
+type restoreSchemaSuite struct {
+	ctx        context.Context
+	rc         *RestoreController
+	dbMetas    []*mydump.MDDatabaseMeta
+	store      storage.ExternalStorage
+	controller *gomock.Controller
+}
+
+func (s *restoreSchemaSuite) SetUpSuite(c *C) {
+	fakeDataDir := c.MkDir()
+	store, err := storage.NewLocalStorage(fakeDataDir)
+	c.Assert(err, IsNil)
+	s.store = store
+	// restore database schema file
+	fakeDBName := "fake_db"
+	fakeDBMeta := &mydump.MDDatabaseMeta{
+		Name:       fakeDBName,
+		SchemaFile: filepath.Join(fakeDataDir, fakeDBName),
+	}
+	err = ioutil.WriteFile(fakeDBMeta.SchemaFile,
+		[]byte(fmt.Sprintf("CREATE DATABASE %s;", fakeDBName)), 0644)
+	c.Assert(err, IsNil)
+	// restore table schema files
+	fakeTableFilesCount := 6
+	for i := 1; i <= fakeTableFilesCount; i++ {
+		fakeTableName := fmt.Sprintf("tbl%d", i)
+		fakeFileName := fmt.Sprintf("%s.%s.sql", fakeDBName, fakeTableName)
+		fakeFilePath := filepath.Join(fakeDataDir, fakeFileName)
+		fakeFileContent := []byte(fmt.Sprintf("CREATE TABLE %s(i TINYINT);", fakeTableName))
+		fakeTableSize := int64(len(fakeFileContent))
+		err = ioutil.WriteFile(fakeFilePath, fakeFileContent, 0644)
+		c.Assert(err, IsNil)
+		fakeDBMeta.Tables = append(fakeDBMeta.Tables, &mydump.MDTableMeta{
+			DB:        fakeDBName,
+			Name:      fakeTableName,
+			TotalSize: fakeTableSize,
+			SchemaFile: mydump.FileInfo{TableName: filter.Table{Schema: fakeDBName, Name: fakeTableName},
+				FileMeta: mydump.SourceFileMeta{Path: fakeFilePath,
+					Type: mydump.SourceTypeTableSchema}},
+		})
+	}
+	// restore view schema files
+	fakeViewFilesCount := 6
+	for i := 1; i <= fakeViewFilesCount; i++ {
+		fakeViewName := fmt.Sprintf("view%d", i)
+		fakeFileName := fmt.Sprintf("%s.%s.sql", fakeDBName, fakeViewName)
+		fakeFilePath := filepath.Join(fakeDataDir, fakeFileName)
+		fakeFileContent := []byte(fmt.Sprintf("CREATE ALGORITHM=UNDEFINED VIEW `%s` (`i`) AS SELECT `i` FROM `%s`.`%s`;", fakeViewName, fakeDBName, fmt.Sprintf("tbl%d", i)))
+		fakeViewSize := int64(len(fakeFileContent))
+		err = ioutil.WriteFile(fakeFilePath, fakeFileContent, 0644)
+		c.Assert(err, IsNil)
+		fakeDBMeta.Views = append(fakeDBMeta.Views, &mydump.MDTableMeta{
+			DB:        fakeDBName,
+			Name:      fakeViewName,
+			TotalSize: fakeViewSize,
+			SchemaFile: mydump.FileInfo{TableName: filter.Table{Schema: fakeDBName, Name: fakeViewName},
+				FileMeta: mydump.SourceFileMeta{Path: fakeFilePath,
+					Type: mydump.SourceTypeViewSchema}},
+		})
+	}
+	s.dbMetas = append(s.dbMetas, fakeDBMeta)
+}
+
+func (s *restoreSchemaSuite) SetUpTest(c *C) {
+	s.ctx = context.Background()
+	s.controller = gomock.NewController(c)
+	mockBackend := mock.NewMockBackend(s.controller)
+	// We don't care the execute results of those
+	mockBackend.EXPECT().
+		FetchRemoteTableModels(gomock.Any(), gomock.Any()).
+		AnyTimes().
+		Return(make([]*model.TableInfo, 0), nil)
+	mockSQLExecutor := mock.NewMockSQLExecutor(s.controller)
+	mockSQLExecutor.EXPECT().
+		ExecuteWithLog(s.ctx, gomock.Any(), gomock.Any(), gomock.Any()).
+		AnyTimes().
+		Return(nil)
+	mockSession := mock.NewMockSession(s.controller)
+	mockSession.EXPECT().
+		Close().
+		AnyTimes().
+		Return()
+	mockSession.EXPECT().
+		Execute(s.ctx, gomock.Any()).
+		AnyTimes().
+		Return(nil, nil)
+	mockTiDBGlue := mock.NewMockGlue(s.controller)
+	mockTiDBGlue.EXPECT().
+		GetSQLExecutor().
+		AnyTimes().
+		Return(mockSQLExecutor)
+	mockTiDBGlue.EXPECT().
+		GetSession(s.ctx).
+		AnyTimes().
+		Return(mockSession, nil)
+	cfg := config.NewConfig()
+	cfg.Mydumper.NoSchema = false
+	cfg.App.RegionConcurrency = 8
+	s.rc = &RestoreController{
+		cfg:           cfg,
+		dbMetas:       s.dbMetas,
+		tidbGlue:      mockTiDBGlue,
+		store:         s.store,
+		backend:       kv.MakeBackend(mockBackend),
+		checkpointsDB: &checkpoints.NullCheckpointsDB{},
+	}
+}
+
+func (s *restoreSchemaSuite) TearDownTest(c *C) {
+	s.controller.Finish()
+}
+
+func (s *restoreSchemaSuite) TestRestoreSchemaSuccessful(c *C) {
+	err := s.rc.restoreSchema(s.ctx)
+	c.Assert(err, IsNil)
+}
+
+func (s *restoreSchemaSuite) TestRestoreSchemaFailed(c *C) {
+	injectErr := errors.New("Somthing wrong")
+	mockSession := mock.NewMockSession(s.controller)
+	mockSession.EXPECT().
+		Close().
+		AnyTimes().
+		Return()
+	mockSession.EXPECT().
+		Execute(s.ctx, gomock.Any()).
+		AnyTimes().
+		Return(nil, injectErr)
+	mockTiDBGlue := mock.NewMockGlue(s.controller)
+	mockTiDBGlue.EXPECT().
+		GetSession(s.ctx).
+		AnyTimes().
+		Return(mockSession, nil)
+	s.rc.tidbGlue = mockTiDBGlue
+	err := s.rc.restoreSchema(s.ctx)
+	c.Assert(err, NotNil)
+	c.Assert(err, Equals, injectErr)
+}
+
+func (s *restoreSchemaSuite) TestRestoreSchemaContextCancel(c *C) {
+	childCtx, cancel := context.WithCancel(s.ctx)
+	mockSession := mock.NewMockSession(s.controller)
+	mockSession.EXPECT().
+		Close().
+		AnyTimes().
+		Return()
+	mockSession.EXPECT().
+		Execute(childCtx, gomock.Any()).
+		AnyTimes().
+		Do(cancel).
+		Return(nil, nil)
+	mockTiDBGlue := mock.NewMockGlue(s.controller)
+	mockTiDBGlue.EXPECT().
+		GetSession(childCtx).
+		AnyTimes().
+		Return(mockSession, nil)
+	s.rc.tidbGlue = mockTiDBGlue
+	err := s.rc.restoreSchema(childCtx)
+	cancel()
+	c.Assert(err, NotNil)
+	c.Assert(err, Equals, childCtx.Err())
+}
